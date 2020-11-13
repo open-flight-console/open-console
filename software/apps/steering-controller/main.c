@@ -2,11 +2,13 @@
 //
 // Reads data from the ADXL327 analog accelerometer
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 
 #include "app_error.h"
+#include "app_timer.h"
 #include "nrf.h"
 #include "nrf_delay.h"
 #include "nrf_gpio.h"
@@ -14,78 +16,63 @@
 #include "nrf_log_ctrl.h"
 #include "nrf_log_default_backends.h"
 #include "nrf_pwr_mgmt.h"
-#include "nrf_serial.h"
-#include "nrfx_gpiote.h"
-#include "nrfx_saadc.h"
+#include "nrf_drv_spi.h"
 
 #include "buckler.h"
+#include "display.h"
+#include "lsm9ds1.h"
+#include "steeringwheel.h"
 
-// ADC channels
-#define X_CHANNEL 0
-#define Y_CHANNEL 1
-#define Z_CHANNEL 2
+NRF_TWI_MNGR_DEF(twi_mngr_instance, 5, 0);
 
-// callback for SAADC events
-void saadc_callback (nrfx_saadc_evt_t const * p_event) {
-  // don't care about adc callbacks
-}
-
-// sample a particular analog channel in blocking mode
-nrf_saadc_value_t sample_value (uint8_t channel) {
-  nrf_saadc_value_t val;
-  ret_code_t error_code = nrfx_saadc_sample_convert(channel, &val);
-  APP_ERROR_CHECK(error_code);
-  return val;
-}
-
-int main (void) {
+int main(void) {
   ret_code_t error_code = NRF_SUCCESS;
 
   // initialize RTT library
   error_code = NRF_LOG_INIT(NULL);
   APP_ERROR_CHECK(error_code);
   NRF_LOG_DEFAULT_BACKENDS_INIT();
+  printf("Log initialized!\n");
 
-  // initialize analog to digital converter
-  nrfx_saadc_config_t saadc_config = NRFX_SAADC_DEFAULT_CONFIG;
-  saadc_config.resolution = NRF_SAADC_RESOLUTION_12BIT;
-  error_code = nrfx_saadc_init(&saadc_config, saadc_callback);
+  // initialize LEDs
+  nrf_gpio_pin_dir_set(23, NRF_GPIO_PIN_DIR_OUTPUT);
+  nrf_gpio_pin_dir_set(24, NRF_GPIO_PIN_DIR_OUTPUT);
+  nrf_gpio_pin_dir_set(25, NRF_GPIO_PIN_DIR_OUTPUT);
+
+  // initialize display
+  nrf_drv_spi_t spi_instance = NRF_DRV_SPI_INSTANCE(1);
+  nrf_drv_spi_config_t spi_config = {
+    .sck_pin = BUCKLER_LCD_SCLK,
+    .mosi_pin = BUCKLER_LCD_MOSI,
+    .miso_pin = BUCKLER_LCD_MISO,
+    .ss_pin = BUCKLER_LCD_CS,
+    .irq_priority = NRFX_SPI_DEFAULT_CONFIG_IRQ_PRIORITY,
+    .orc = 0,
+    .frequency = NRF_DRV_SPI_FREQ_4M,
+    .mode = NRF_DRV_SPI_MODE_2,
+    .bit_order = NRF_DRV_SPI_BIT_ORDER_MSB_FIRST
+  };
+  error_code = nrf_drv_spi_init(&spi_instance, &spi_config, NULL, NULL);
   APP_ERROR_CHECK(error_code);
-
-  // initialize analog inputs
-  // configure with 0 as input pin for now
-  nrf_saadc_channel_config_t channel_config = NRFX_SAADC_DEFAULT_CHANNEL_CONFIG_SE(0);
-  channel_config.gain = NRF_SAADC_GAIN1_6; // input gain of 1/6 Volts/Volt, multiply incoming signal by (1/6)
-  channel_config.reference = NRF_SAADC_REFERENCE_INTERNAL; // 0.6 Volt reference, input after gain can be 0 to 0.6 Volts
-
-  // specify input pin and initialize that ADC channel
-  channel_config.pin_p = BUCKLER_ANALOG_ACCEL_X;
-  error_code = nrfx_saadc_channel_init(X_CHANNEL, &channel_config);
+  display_init(&spi_instance);
+  display_write("Turn me UWU", DISPLAY_LINE_0);
+  printf("Display initialized!\n");
+  
+  nrf_drv_twi_config_t i2c_config = NRF_DRV_TWI_DEFAULT_CONFIG;
+  i2c_config.scl = BUCKLER_SENSORS_SCL;
+  i2c_config.sda = BUCKLER_SENSORS_SDA;
+  i2c_config.frequency = NRF_TWIM_FREQ_100K;
+  error_code = nrf_twi_mngr_init(&twi_mngr_instance, &i2c_config);
   APP_ERROR_CHECK(error_code);
-
-  // specify input pin and initialize that ADC channel
-  channel_config.pin_p = BUCKLER_ANALOG_ACCEL_Y;
-  error_code = nrfx_saadc_channel_init(Y_CHANNEL, &channel_config);
-  APP_ERROR_CHECK(error_code);
-
-  // specify input pin and initialize that ADC channel
-  channel_config.pin_p = BUCKLER_ANALOG_ACCEL_Z;
-  error_code = nrfx_saadc_channel_init(Z_CHANNEL, &channel_config);
-  APP_ERROR_CHECK(error_code);
-
-  // initialization complete
-  printf("Buckler initialized!\n");
-
-  // loop forever
+  lsm9ds1_init(&twi_mngr_instance);
+  printf("IMU initialized!\n");
+  
+  steering_wheel_state_t state = OFF;
+  // loop forever, running state machine
   while (1) {
-    // sample analog inputs
-    nrf_saadc_value_t x_val = sample_value(X_CHANNEL);
-    nrf_saadc_value_t y_val = sample_value(Y_CHANNEL);
-    nrf_saadc_value_t z_val = sample_value(Z_CHANNEL);
-
-    // display results
-    printf("x: %d\ty: %d\tz:%d\n", x_val, y_val, z_val);
-    nrf_delay_ms(250);
+    nrf_delay_ms(1);
+    state = controller(state);
+  
   }
 }
 
