@@ -1,4 +1,4 @@
-#Bill Of Materials for Open Flight Console
+## Bill Of Materials for Open Flight Console
 
 Resistors, Capacitors, and some other jellybean components can be sourced for free at local makerspace.
 
